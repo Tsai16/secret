@@ -2,3 +2,6 @@
 *.gcda
 lcov.secret
 secret
+*.o
+test
+
