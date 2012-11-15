@@ -3,5 +3,4 @@
 lcov.secret
 secret
 *.o
-test
-
+.depend

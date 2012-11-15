@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <minix/drivers.h>
@@ -45,19 +46,67 @@ PRIVATE struct device hello_device;
 /** State variable to count the number of times the device has been opened. */
 PRIVATE int open_counter;
 PRIVATE int inUse = 0;
+PRIVATE int curUser = -1;
 PRIVATE char secret[SECRET_SIZE];
-PRIVATE struct ucred credentials;
 
-PRIVATE int hello_open(message *UNUSED(m))
+PRIVATE int hello_open(message *m)
 {
-    printf("hello_open(). Called %d time(s).\n", ++open_counter);
-    return OK;
+  struct ucred cred;
+  int status;
+
+  status = getnucred(m->USER_ENDPT, &cred);
+
+  /*
+  printf("\tinUse: %d \t curUser: %d\n", inUse, curUser);
+  printf("\ttype: %d\t", m->m_type);
+  printf("count: %d\t", (int)m->COUNT);
+  printf("source: %d\t", m->m_source);
+  printf("request: %d\n", m->REQUEST);
+  printf("\tuid: %d\t\tgid: %d\t\tpid: %d\n", cred.uid, cred.gid,cred.pid);
+  */
+
+  switch (m->COUNT) {
+    case 2: // write
+      if(inUse == 0) {
+        inUse = 1;
+        curUser = cred.uid;
+        return OK;
+      } else if (inUse && (cred.uid != curUser)) {
+        return EACCES;
+      } else {
+        return ENOSPC;
+      }
+      break;
+
+    case 4: // READ
+      if (curUser == -1) {
+        return OK;
+      } else if(cred.uid == curUser) {
+        curUser = -1;
+        inUse = 0;
+        return OK;
+      } else {
+        return EACCES;      
+      }
+      break;
+
+    case 6: // READ/WRITE
+      return EACCES;
+      break;
+      
+    default:
+      break;
+  }  
+
+  return OK;
 }
 
-PRIVATE int hello_close(message *UNUSED(m))
+PRIVATE int hello_close(message *m)
 {
-    //printf("hello_close()\n");
-    return OK;
+  if(inUse == 0) {
+    secret[0] = '\0';
+  }  
+  return OK;
 }
 
 PRIVATE struct device * hello_prepare(dev_t UNUSED(dev))
@@ -72,16 +121,14 @@ PRIVATE int hello_transfer(endpoint_t endpt,
                            u64_t position,
                            iovec_t *iov, 
                            unsigned nr_req, 
-                           endpoint_t UNUSED(user_endpt))
+                           endpoint_t user_endpt)
 {
     int bytes, ret;
-    int status;
+    //caint status;
     //char letters[100];
     
     
-    status = getnucred(endpt, &credentials);
-    //sprintf("%d",)
-    
+    //status = getnucred(user_endpt, &credentials);    
     //printf("original : %d\n", credentials.uid);
     //printf("current : %d\n", getuid());
     //printf("inUse: %d\n", inUse);
@@ -94,36 +141,49 @@ PRIVATE int hello_transfer(endpoint_t endpt,
         printf("HELLO: vectored transfer request, using first element only\n");
     }
 
-    bytes = strlen(HELLO_MESSAGE) - ex64lo(position) < iov->iov_size ?
-            strlen(HELLO_MESSAGE) - ex64lo(position) : iov->iov_size;
     // iov->size = size of data
 
-    printf("iov_size: %lu\n", iov->iov_size);
-    printf("bytest: %d\n", bytes);
+    switch (opcode)
+    {
+      case DEV_GATHER_S: // Reading        
+          bytes = strlen(secret) - ex64lo(position) < iov->iov_size ?
+                  strlen(secret) - ex64lo(position) : iov->iov_size;
+        break;
+      
+      case DEV_SCATTER_S: //Writing
+        bytes = iov->iov_size;
+        break;
+    }
+    /*
+    printf("\tiov_size: %lu\t", iov->iov_size);
+    printf("position: %lu\t", ex64lo(position));    
+    printf("len: %d\t\t", strlen(secret));
+    printf("bytes: %d\n", bytes);    
+    */
+ 
     if (bytes <= 0)
     {
         return OK;
     }
     switch (opcode)
     {
-        case DEV_GATHER_S:
+        case DEV_GATHER_S: // Reading
+            //bytes = strlen(secret);
             ret = sys_safecopyto(
                                  endpt, 
                                  (cp_grant_id_t) iov->iov_addr, 
                                  0,
-                                 (vir_bytes) (HELLO_MESSAGE + ex64lo(position)),
+                                 (vir_bytes) secret,
+                                 //(vir_bytes) (HELLO_MESSAGE + ex64lo(position)),
                                  bytes, 
                                  D);
             iov->iov_size -= bytes;
-            //printf("spot_gather: %d\n",opcode);    
+            inUse = 0;
             break;
-        case DEV_WRITE_S:
-            printf("write_opcode: %d\n",opcode);    
-          break;
 
-        case DEV_SCATTER_S:
-            inUse = 5;
-            printf("scatter_opcode: %d\n",opcode);
+        case DEV_SCATTER_S: //Writing
+            inUse = 1;
+            //bytes = iov->iov_size;        
             ret = sys_safecopyfrom(
                                     endpt, 
                                     (cp_grant_id_t) iov->iov_addr,
@@ -131,29 +191,54 @@ PRIVATE int hello_transfer(endpoint_t endpt,
                                     (vir_bytes) &secret, 
                                     bytes, 
                                     D);
-            printf("ret: %d\n", ret);        					   
             break;
 
         default:
             return EINVAL;
     }
-    return ret;
+
+    return bytes;
 }
 
 PRIVATE int sef_cb_lu_state_save(int UNUSED(state)) {
-/* Save the state. */
-    ds_publish_u32("open_counter", open_counter, DSF_OVERWRITE);
-
-    return OK;
+  /* Save the state. */
+  ds_publish_u32("open_counter", open_counter, DSF_OVERWRITE);
+  ds_publish_u32("inUse", inUse, DSF_OVERWRITE);
+  ds_publish_u32("curUser", curUser, DSF_OVERWRITE);
+  ds_publish_u32("secretSize", strlen(secret), DSF_OVERWRITE);
+  ds_publish_str("secret", secret, DSF_OVERWRITE);
+  
+  
+  return OK;
 }
 
 PRIVATE int lu_state_restore() {
-/* Restore the state. */
+  /* Restore the state. */
     u32_t value;
+    size_t secretSize;
+
+    ds_retrieve_u32("secretSize", &value);
+    ds_delete_u32("secretSize");
+    secretSize = (int) value;
+
+    ds_retrieve_str("secret", secret, secretSize);
+    ds_delete_str("secret");
 
     ds_retrieve_u32("open_counter", &value);
     ds_delete_u32("open_counter");
     open_counter = (int) value;
+
+    ds_retrieve_u32("inUse", &value);
+    ds_delete_u32("inUse");
+    inUse = (int) value;
+
+    ds_retrieve_u32("curUser", &value);
+    ds_delete_u32("curUser");
+    curUser = (int) value;
+    
+    printf("secret: %s\n", secret);
+    printf("curuser: %d\n", curUser);
+    printf("inUse: %d\n", inUse);
 
     return OK;
 }
@@ -189,19 +274,18 @@ PRIVATE int sef_cb_init(int type, sef_init_info_t *UNUSED(info))
     open_counter = 0;
     switch(type) {
         case SEF_INIT_FRESH:
-            printf("%s", HELLO_MESSAGE);
+            //printf("%s", HELLO_MESSAGE);
         break;
 
         case SEF_INIT_LU:
             /* Restore the state. */
             lu_state_restore();
             do_announce_driver = FALSE;
-
-            printf("%sHey, I'm a new version!\n", HELLO_MESSAGE);
+            printf("I'm a new version!\n");
         break;
 
         case SEF_INIT_RESTART:
-            printf("%sHey, I've just been restarted!\n", HELLO_MESSAGE);
+            printf("Hey, I've just been restarted!\n");
         break;
     }
 

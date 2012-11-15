@@ -1,0 +1,2 @@
+echo "world" > /dev/secret
+service update /usr/sbin/secret

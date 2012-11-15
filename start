@@ -1,0 +1,4 @@
+make clean
+make
+make install
+service up /usr/sbin/secret -dev /dev/secret
