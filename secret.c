@@ -6,18 +6,20 @@
 #include <minix/drivers.h>
 #include <minix/chardriver.h>
 #include <minix/ds.h>
+#include <sys/ioc_secret.h>
 #include "secret.h"
 
 /*
  * Function prototypes for the hello driver.
  */
-FORWARD _PROTOTYPE( int hello_open,      (message *m) );
-FORWARD _PROTOTYPE( int hello_close,     (message *m) );
-FORWARD _PROTOTYPE( struct device * hello_prepare, (dev_t device) );
-FORWARD _PROTOTYPE( int hello_transfer,  (endpoint_t endpt, int opcode,
+FORWARD _PROTOTYPE( int secret_open,      (message *m) );
+FORWARD _PROTOTYPE( int secret_close,     (message *m) );
+FORWARD _PROTOTYPE( struct device * secret_prepare, (dev_t device) );
+FORWARD _PROTOTYPE( int secret_transfer,  (endpoint_t endpt, int opcode,
                                           u64_t position, iovec_t *iov,
                                           unsigned int nr_req,
                                           endpoint_t user_endpt) );
+FORWARD _PROTOTYPE( int secret_ioctl, (message *m_ptr) );
 
 /* SEF functions and variables. */
 FORWARD _PROTOTYPE( void sef_local_startup, (void) );
@@ -28,11 +30,11 @@ FORWARD _PROTOTYPE( int lu_state_restore, (void) );
 /* Entry points to the hello driver. */
 PRIVATE struct chardriver hello_tab =
 {
-    hello_open,
-    hello_close,
-    nop_ioctl,
-    hello_prepare,
-    hello_transfer,
+    secret_open,
+    secret_close,
+    secret_ioctl,
+    secret_prepare,
+    secret_transfer,
     nop_cleanup,
     nop_alarm,
     nop_cancel,
@@ -40,30 +42,41 @@ PRIVATE struct chardriver hello_tab =
     NULL
 };
 
-/** Represents the /dev/hello device. */
-PRIVATE struct device hello_device;
 
-/** State variable to count the number of times the device has been opened. */
-PRIVATE int open_counter;
+PRIVATE struct device hello_device;
 PRIVATE int inUse = 0;
 PRIVATE int curUser = -1;
 PRIVATE char secret[SECRET_SIZE];
+PRIVATE int curSize = 0; // current size  of secret
 
-PRIVATE int hello_open(message *m)
+
+PRIVATE int secret_ioctl(message *m)
+{
+  struct ucred cred;
+  int status;
+  int res;
+  int grantee;
+
+  status = getnucred(m->USER_ENDPT, &cred);    
+  res = sys_safecopyfrom(m->USER_ENDPT, (vir_bytes)m->IO_GRANT,
+                             0, (vir_bytes)&grantee, sizeof(grantee), D);
+                             
+  if(m->REQUEST == SSGRANT){
+    if(cred.uid == curUser) {
+      curUser = grantee;
+    }
+    return OK;
+  }
+  
+  return ENOTTY;
+}
+
+PRIVATE int secret_open(message *m)
 {
   struct ucred cred;
   int status;
 
-  status = getnucred(m->USER_ENDPT, &cred);
-
-  /*
-  printf("\tinUse: %d \t curUser: %d\n", inUse, curUser);
-  printf("\ttype: %d\t", m->m_type);
-  printf("count: %d\t", (int)m->COUNT);
-  printf("source: %d\t", m->m_source);
-  printf("request: %d\n", m->REQUEST);
-  printf("\tuid: %d\t\tgid: %d\t\tpid: %d\n", cred.uid, cred.gid,cred.pid);
-  */
+  status = getnucred(m->USER_ENDPT, &cred);  
 
   switch (m->COUNT) {
     case 2: // write
@@ -101,22 +114,22 @@ PRIVATE int hello_open(message *m)
   return OK;
 }
 
-PRIVATE int hello_close(message *m)
+PRIVATE int secret_close(message *m)
 {
   if(inUse == 0) {
-    secret[0] = '\0';
+      memset(&secret[0], 0, sizeof(secret));
   }  
   return OK;
 }
 
-PRIVATE struct device * hello_prepare(dev_t UNUSED(dev))
+PRIVATE struct device * secret_prepare(dev_t UNUSED(dev))
 {
     hello_device.dv_base = make64(0, 0);
-    hello_device.dv_size = make64(strlen(HELLO_MESSAGE), 0);
+    hello_device.dv_size = make64(SECRET_SIZE, 0);
     return &hello_device;
 }
 
-PRIVATE int hello_transfer(endpoint_t endpt, 
+PRIVATE int secret_transfer(endpoint_t endpt, 
                            int opcode, 
                            u64_t position,
                            iovec_t *iov, 
@@ -124,30 +137,16 @@ PRIVATE int hello_transfer(endpoint_t endpt,
                            endpoint_t user_endpt)
 {
     int bytes, ret;
-    //caint status;
-    //char letters[100];
     
-    
-    //status = getnucred(user_endpt, &credentials);    
-    //printf("original : %d\n", credentials.uid);
-    //printf("current : %d\n", getuid());
-    //printf("inUse: %d\n", inUse);
-    //printf("iov->iov_size(%lu)\n", iov->iov_size);    // size of thing being written
-
-
-    if (nr_req != 1)
-    {
+    if (nr_req != 1) {
         /* This should never trigger for character drivers at the moment. */
         printf("HELLO: vectored transfer request, using first element only\n");
     }
 
-    // iov->size = size of data
-
-    switch (opcode)
-    {
+    switch (opcode) {
       case DEV_GATHER_S: // Reading        
-          bytes = strlen(secret) - ex64lo(position) < iov->iov_size ?
-                  strlen(secret) - ex64lo(position) : iov->iov_size;
+          bytes = curSize < iov->iov_size ?
+                  curSize : iov->iov_size;
         break;
       
       case DEV_SCATTER_S: //Writing
@@ -155,65 +154,51 @@ PRIVATE int hello_transfer(endpoint_t endpt,
         break;
     }
     /*
-    printf("\tiov_size: %lu\t", iov->iov_size);
-    printf("position: %lu\t", ex64lo(position));    
-    printf("len: %d\t\t", strlen(secret));
-    printf("bytes: %d\n", bytes);    
+    printf("\tiov_size: %lu\t", iov->iov_size);   
+    printf("curSize: %d\t", curSize);
+    printf("bytes: %d\t", bytes);
+    printf("secret: %s\n", secret);
     */
- 
-    if (bytes <= 0)
-    {
+    
+    if (bytes <= 0) {
         return OK;
     }
-    switch (opcode)
-    {
+    switch (opcode) {
         case DEV_GATHER_S: // Reading
-            //bytes = strlen(secret);
-            ret = sys_safecopyto(
-                                 endpt, 
-                                 (cp_grant_id_t) iov->iov_addr, 
-                                 0,
-                                 (vir_bytes) secret,
-                                 //(vir_bytes) (HELLO_MESSAGE + ex64lo(position)),
-                                 bytes, 
-                                 D);
-            iov->iov_size -= bytes;
             inUse = 0;
+            curSize -= bytes;    
+            ret = sys_safecopyto(endpt, (cp_grant_id_t) iov->iov_addr, 0,
+                                 (vir_bytes) secret, bytes, D);
             break;
 
         case DEV_SCATTER_S: //Writing
-            inUse = 1;
-            //bytes = iov->iov_size;        
-            ret = sys_safecopyfrom(
-                                    endpt, 
-                                    (cp_grant_id_t) iov->iov_addr,
-                                    0, 
-                                    (vir_bytes) &secret, 
-                                    bytes, 
-                                    D);
+            inUse = 1;  
+            curSize += bytes;    
+            ret = sys_safecopyfrom(endpt, (cp_grant_id_t) iov->iov_addr, 0, 
+                                  (vir_bytes) &secret, bytes, D);
             break;
 
         default:
             return EINVAL;
     }
-
-    return bytes;
+    iov->iov_size -= bytes;
+    return ret;
 }
 
 PRIVATE int sef_cb_lu_state_save(int UNUSED(state)) {
+
   /* Save the state. */
-  ds_publish_u32("open_counter", open_counter, DSF_OVERWRITE);
   ds_publish_u32("inUse", inUse, DSF_OVERWRITE);
   ds_publish_u32("curUser", curUser, DSF_OVERWRITE);
+  ds_publish_u32("curSize", curSize, DSF_OVERWRITE);
   ds_publish_u32("secretSize", strlen(secret), DSF_OVERWRITE);
-  ds_publish_str("secret", secret, DSF_OVERWRITE);
-  
-  
+  ds_publish_str("secret", secret, DSF_OVERWRITE);  
   return OK;
 }
 
 PRIVATE int lu_state_restore() {
-  /* Restore the state. */
+
+    /* Restore the state. */
     u32_t value;
     size_t secretSize;
 
@@ -224,13 +209,13 @@ PRIVATE int lu_state_restore() {
     ds_retrieve_str("secret", secret, secretSize);
     ds_delete_str("secret");
 
-    ds_retrieve_u32("open_counter", &value);
-    ds_delete_u32("open_counter");
-    open_counter = (int) value;
-
     ds_retrieve_u32("inUse", &value);
     ds_delete_u32("inUse");
     inUse = (int) value;
+
+    ds_retrieve_u32("curSize", &value);
+    ds_delete_u32("curSize");
+    curSize = (int) value;
 
     ds_retrieve_u32("curUser", &value);
     ds_delete_u32("curUser");
@@ -271,7 +256,6 @@ PRIVATE int sef_cb_init(int type, sef_init_info_t *UNUSED(info))
 /* Initialize the hello driver. */
     int do_announce_driver = TRUE;
 
-    open_counter = 0;
     switch(type) {
         case SEF_INIT_FRESH:
             //printf("%s", HELLO_MESSAGE);
@@ -312,3 +296,21 @@ PUBLIC int main(void)
     return OK;
 }
 
+
+  /*
+  printf("-------------\n");  
+  printf("inUse: %d \t curUser: %d\n", inUse, curUser);
+  printf("type: %d\t", m->m_type);
+  printf("count: %d\t", (int)m->COUNT);
+  printf("source: %d\t", m->m_source);
+  printf("request: %d\n", m->REQUEST);
+  printf("uid: %d\t\tgid: %d\t\tpid: %d\n", cred.uid, cred.gid,cred.pid);
+  printf("-------------\n");  
+  */
+
+
+    //status = getnucred(user_endpt, &credentials);    
+    //printf("original : %d\n", credentials.uid);
+    //printf("current : %d\n", getuid());
+    //printf("inUse: %d\n", inUse);
+    //printf("iov->iov_size(%lu)\n", iov->iov_size);    // size of thing being written

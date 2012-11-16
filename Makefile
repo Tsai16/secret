@@ -8,6 +8,9 @@ LDADD+=	-lchardriver -lsys
 test: test.c
 	gcc -g -Wall test.c  -o test
 
+grant: grant.c
+	gcc -g -Wall grant.c  -o grant
+
 
 MAN=
 

@@ -41,4 +41,5 @@ secret.o secret.ln: secret.c /usr/include/stdio.h /usr/include/sys/cdefs.h \
   /usr/include/sys/inttypes.h /usr/include/machine/int_fmtio.h \
   /usr/include/machine/param.h /usr/include/machine/vmparam.h \
   /usr/include/minix/chardriver.h /usr/include/minix/driver.h \
-  /usr/include/minix/partition.h /usr/include/minix/ds.h secret.h
+  /usr/include/minix/partition.h /usr/include/minix/ds.h \
+  /usr/include/sys/ioc_secret.h /usr/include/minix/ioctl.h secret.h

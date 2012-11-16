@@ -2,5 +2,3 @@
 *.gcda
 lcov.secret
 secret
-*.o
-.depend
