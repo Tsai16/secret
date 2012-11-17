@@ -46,7 +46,8 @@ PRIVATE struct chardriver hello_tab =
 PRIVATE struct device hello_device;
 PRIVATE int inUse = 0;
 PRIVATE int curUser = -1;
-PRIVATE char secret[SECRET_SIZE];
+PRIVATE char sec[SECRET_SIZE];
+PRIVATE char *secret = sec;
 PRIVATE int curSize = 0; // current size  of secret
 
 
@@ -137,6 +138,7 @@ PRIVATE int secret_transfer(endpoint_t endpt,
                            endpoint_t user_endpt)
 {
     int bytes, ret;
+    int overFlag = 0;
     
     if (nr_req != 1) {
         /* This should never trigger for character drivers at the moment. */
@@ -150,16 +152,14 @@ PRIVATE int secret_transfer(endpoint_t endpt,
         break;
       
       case DEV_SCATTER_S: //Writing
-        bytes = iov->iov_size;
+        if(curSize + iov->iov_size < SECRET_SIZE) {
+          bytes =  iov->iov_size;
+        } else {
+          bytes = SECRET_SIZE - curSize;
+          overFlag = 1;        
+        }        
         break;
-    }
-    /*
-    printf("\tiov_size: %lu\t", iov->iov_size);   
-    printf("curSize: %d\t", curSize);
-    printf("bytes: %d\t", bytes);
-    printf("secret: %s\n", secret);
-    */
-    
+    }    
     if (bytes <= 0) {
         return OK;
     }
@@ -173,16 +173,23 @@ PRIVATE int secret_transfer(endpoint_t endpt,
 
         case DEV_SCATTER_S: //Writing
             inUse = 1;  
-            curSize += bytes;    
             ret = sys_safecopyfrom(endpt, (cp_grant_id_t) iov->iov_addr, 0, 
-                                  (vir_bytes) &secret, bytes, D);
+                                  (vir_bytes) (secret + curSize), bytes, D);
+            curSize += bytes;    
             break;
+
 
         default:
             return EINVAL;
     }
     iov->iov_size -= bytes;
-    return ret;
+  
+    if(overFlag) {
+      return ENOSPC;
+    } else {
+      return ret;    
+    }
+
 }
 
 PRIVATE int sef_cb_lu_state_save(int UNUSED(state)) {
@@ -253,7 +260,6 @@ PRIVATE void sef_local_startup()
 
 PRIVATE int sef_cb_init(int type, sef_init_info_t *UNUSED(info))
 {
-/* Initialize the hello driver. */
     int do_announce_driver = TRUE;
 
     switch(type) {
@@ -284,14 +290,7 @@ PRIVATE int sef_cb_init(int type, sef_init_info_t *UNUSED(info))
 
 PUBLIC int main(void)
 {
-    /*
-     * Perform initialization.
-     */
     sef_local_startup();
-
-    /*
-     * Run the main loop.
-     */
     chardriver_task(&hello_tab, CHARDRIVER_SYNC);
     return OK;
 }
